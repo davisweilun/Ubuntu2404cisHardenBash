@@ -1,0 +1,11 @@
+Name: CIS pam_faillock preauth and account
+Default: yes
+Priority: 1024
+Auth-Type: Primary
+Auth:
+	requisite pam_faillock.so preauth
+Auth-Initial:
+	requisite pam_faillock.so preauth
+Account-Type: Primary
+Account:
+	required pam_faillock.so

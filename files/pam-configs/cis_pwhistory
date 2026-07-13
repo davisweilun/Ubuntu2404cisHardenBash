@@ -1,0 +1,8 @@
+Name: CIS pam_pwhistory password history
+Default: yes
+Priority: 1024
+Password-Type: Primary
+Password:
+	requisite pam_pwhistory.so use_authtok
+Password-Initial:
+	requisite pam_pwhistory.so use_authtok

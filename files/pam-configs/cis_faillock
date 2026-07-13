@@ -1,0 +1,8 @@
+Name: CIS pam_faillock authfail
+Default: yes
+Priority: 0
+Auth-Type: Primary
+Auth:
+	[default=die] pam_faillock.so authfail
+Auth-Initial:
+	[default=die] pam_faillock.so authfail
