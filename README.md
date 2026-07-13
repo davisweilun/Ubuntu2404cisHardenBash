@@ -2,7 +2,7 @@
 
 Hardens **Ubuntu Server 24.04** to the **CIS Ubuntu Linux 24.04 LTS Benchmark v2.0.0 (L1 + L2)** using **pure Bash — zero dependencies**. Clone onto the target VM and run. No Ansible, no Python libraries, no control node, no internet required.
 
-This is a faithful port of the `Ubuntu2404cisHardening` Ansible project: same controls, same safe-by-default toggles, same risk flags. That project's `docs/` and `meta/control_index.yml` remain the per-control source of record.
+Originally a faithful port of the `Ubuntu2404cisHardening` Ansible project (same safe-by-default toggles, same risk flags). **Phase 2** extended it to full benchmark coverage, driven by CIS-CAT Assessor scan evidence from a live lab VM: ~58 additional controls (cron perms, issue/issue.net banners, dccp/rds/sctp/tipc modules, 12 more network sysctls, sshd Banner/LoginGraceTime/MaxStartups, sudo logfile, GRUB audit params, the full 6.2.3 audit ruleset incl. 32-bit arch lines and generated privileged-command rules, AIDE) plus scanner-exactness fixes (APT literal `"0"`, alternate telnet/ftp packages, dynamic MOTD scripts, sysctl conflicts in `/etc/ufw/sysctl.conf` and friends, password aging for existing users, login.defs UMASK).
 
 ---
 
@@ -109,4 +109,6 @@ The script itself needs no network. A few controls install packages (`apparmor`,
 
 ## Validation
 
-Tested end-to-end in an `ubuntu:24.04` container (with openssh-server/sudo present): full apply exits 0, a second run reports **0 FIXED** (idempotent), dry-run touches nothing, sshd settings verified live via `sshd -T`, and `pam-auth-update` correctly merges the faillock/pwhistory profiles into `common-auth`/`common-password`. Validate on a non-prod VM and re-run your Tenable/CIS scan to confirm remediated controls flip to pass.
+Tested end-to-end in an `ubuntu:24.04` container (openssh-server/sudo/cron/rsyslog present): full apply exits 0 (68 controls fixed on a fresh system), a second run reports **0 FIXED** (idempotent), dry-run touches nothing, sshd settings verified live via `sshd -T`, sysctl-conflict neutralization verified against a simulated `/etc/ufw/sysctl.conf`, and `pam-auth-update` correctly merges the faillock/pwhistory profiles. Expected residual scan failures after a full run (`--deferred` + reboot) are only the documented opt-in/high-risk toggles, out-of-scope partition controls, the bootloader password, and any `[K8S-RISK]`-excluded container storage paths.
+
+Note: controls 6.2.1.3/6.2.1.4 (GRUB `audit=1`) and 6.2.3.29 (immutable audit config, opt-in) need a reboot to take runtime effect; the AIDE database first build (6.3.2) can take several minutes on large filesystems.

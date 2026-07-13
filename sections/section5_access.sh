@@ -27,7 +27,10 @@ PermitRootLogin ${CIS_5_1_PERMITROOTLOGIN}
 MaxAuthTries ${CIS_5_1_16_MAXAUTHTRIES}
 ClientAliveInterval ${CIS_5_1_7_CLIENTALIVEINTERVAL}
 ClientAliveCountMax ${CIS_5_1_7_CLIENTALIVECOUNTMAX}
-MACs ${CIS_5_1_MACS}"
+MACs ${CIS_5_1_MACS}
+Banner ${CIS_5_1_5_BANNER}
+LoginGraceTime ${CIS_5_1_13_LOGINGRACETIME}
+MaxStartups ${CIS_5_1_17_MAXSTARTUPS}"
     if bool "$CIS_5_1_8_DISABLEFORWARDING" && bool "$CIS_LEVEL2_ENABLED"; then
         content+=$'\n'"DisableForwarding yes"
     fi
@@ -45,7 +48,19 @@ MACs ${CIS_5_1_MACS}"
     fi
     return 0
 }
-run 1 5.1 "sshd hardening drop-in (root login, MaxAuthTries, keepalive, MACs)" c_5_1_sshd
+run 1 5.1 "sshd hardening drop-in (root login, MaxAuthTries, keepalive, MACs, Banner, GraceTime, MaxStartups)" c_5_1_sshd
+
+# 5.1.1 — sshd config files root:root 0600 (main file and all drop-ins).
+c_5_1_1() {
+    [[ -f /etc/ssh/sshd_config ]] || { SKIP_REASON="openssh-server not installed"; return 0; }
+    local f
+    ensure_perms /etc/ssh/sshd_config 0600 root root
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+        [[ -f $f ]] && ensure_perms "$f" 0600 root root
+    done
+    return 0
+}
+run 1 5.1.1 "sshd config files root:root 0600" c_5_1_1
 
 # -----------------------------------------------------------------------------
 # 5.2.x — sudo / su
@@ -81,6 +96,28 @@ c_5_2_4() {
     return 0
 }
 run 2 5.2.4 "sudo requires a password (strip NOPASSWD)" c_5_2_4
+
+# 5.2.3 — sudo log file (visudo-validated drop-in).
+c_5_2_3() {
+    command -v visudo >/dev/null || { SKIP_REASON="sudo not installed"; return 0; }
+    local f=/etc/sudoers.d/99-cis-logfile tmp
+    local content="Defaults logfile=\"${CIS_5_2_3_SUDO_LOGFILE}\""
+    if [[ -f $f && $(<"$f") == "$content" ]]; then
+        return 0
+    fi
+    CHANGED=1
+    (( DRY_RUN )) && return 0
+    tmp=$(mktemp)
+    printf '%s\n' "$content" > "$tmp"
+    if ! visudo -cf "$tmp" >>"$LOG_FILE" 2>&1; then
+        rm -f "$tmp"
+        return 1
+    fi
+    backup_file "$f"
+    install -m 0440 -o root -g root "$tmp" "$f"
+    rm -f "$tmp"
+}
+run 1 5.2.3 "sudo log file (${CIS_5_2_3_SUDO_LOGFILE})" c_5_2_3
 
 # 5.2.7 — restrict the su command to members of an (empty) group via pam_wheel.
 c_5_2_7() {
@@ -121,6 +158,20 @@ run 1 5.2.7 "Restrict su via pam_wheel + empty group" c_5_2_7
 # -----------------------------------------------------------------------------
 # 5.3.x — PAM: password quality, lockout, history
 # -----------------------------------------------------------------------------
+# 5.3.1.3/5.3.1.4 — pwquality tooling present and current. Installing
+# libpam-pwquality also registers its pam-config profile, which enables
+# pam_pwquality in common-password (5.3.2.3) via pam-auth-update below.
+c_5_3_1_pkgs() {
+    local was=$CHANGED
+    pkg_present libpam-pwquality cracklib-runtime
+    if (( CHANGED && ! was )) && [[ -z $SKIP_REASON ]] && (( ! DRY_RUN )); then
+        # newly installed: regenerate common-* so pam_pwquality is active now
+        DEBIAN_FRONTEND=noninteractive pam-auth-update --package >>"$LOG_FILE" 2>&1 || true
+    fi
+    return 0
+}
+run 1 5.3.1.3 "libpam-pwquality + cracklib-runtime installed (enables pam_pwquality)" c_5_3_1_pkgs
+
 # 5.3.3.1.{1,2,3} — account lockout (pam_faillock).
 c_5_3_3_1() {
     local content
@@ -223,7 +274,64 @@ c_5_4_1_5() {
 }
 run 1 5.4.1.5 "Default inactive password lock (INACTIVE=${CIS_5_4_INACTIVE_LOCK_DAYS})" c_5_4_1_5
 
+# 5.4.1.1/5.4.1.5 (existing accounts) — login.defs/useradd only govern accounts
+# created later; the audit also inspects every existing user with a password.
+# [AD-RISK] touches local accounts only (reads /etc/shadow).
+c_5_4_1_existing() {
+    if ! bool "$CIS_5_4_APPLY_TO_EXISTING_USERS"; then
+        SKIP_REASON="disabled via CIS_5_4_APPLY_TO_EXISTING_USERS"
+        return 0
+    fi
+    local user pw lastchg min max warn inact rest n=0
+    while IFS=: read -r user pw lastchg min max warn inact rest; do
+        [[ $pw == \$* ]] || continue    # only accounts with a real password hash
+        if [[ -z $max ]] || (( max > CIS_5_4_PASS_MAX_DAYS )); then
+            CHANGED=1
+            n=$((n + 1))
+            (( DRY_RUN )) || chage --maxdays "$CIS_5_4_PASS_MAX_DAYS" "$user" >>"$LOG_FILE" 2>&1
+        fi
+        if [[ -z $inact || $inact == -1 ]] || (( inact > CIS_5_4_INACTIVE_LOCK_DAYS )); then
+            CHANGED=1
+            n=$((n + 1))
+            (( DRY_RUN )) || chage --inactive "$CIS_5_4_INACTIVE_LOCK_DAYS" "$user" >>"$LOG_FILE" 2>&1
+        fi
+    done < /etc/shadow
+    (( n )) && EXTRA_MSG="$n aging value(s) tightened on existing users"
+    return 0
+}
+run 1 5.4.1.1 "Password aging applied to existing users (chage)" c_5_4_1_existing
+
+# 5.4.2.5 — root PATH integrity. Fixing root's PATH automatically is unsafe
+# (it is set by shells, profiles and admin habits) — audit and report instead.
+c_5_4_2_5() {
+    local dir issues=() path dirs=()
+    # root's PATH as a login shell sees it (script itself runs as root)
+    path=$(bash -lc 'printf %s "$PATH"' 2>/dev/null)
+    [[ -z $path ]] && path=$PATH
+    IFS=: read -ra dirs <<<"$path"
+    for dir in "${dirs[@]}"; do
+        if [[ -z $dir || $dir == "." ]]; then
+            issues+=("empty or '.' entry")
+        elif [[ ! -d $dir ]]; then
+            issues+=("$dir does not exist")
+        else
+            local st
+            st=$(stat -Lc '%U %a' "$dir")   # -L: /bin and /sbin are symlinks
+            [[ ${st%% *} != root ]] && issues+=("$dir not owned by root")
+            (( 8#${st##* } & 8#0022 )) && issues+=("$dir is group/world-writable")
+        fi
+    done
+    if (( ${#issues[@]} )); then
+        STATUS_OVERRIDE=MANUAL
+        EXTRA_MSG="root PATH issues: ${issues[*]} — correct manually"
+    fi
+    return 0
+}
+run 1 5.4.2.5 "Root PATH integrity (report only)" c_5_4_2_5
+
 # 5.4.3.2 — shell timeout (TMOUT). 5.4.3.3 — default umask.
+# The audit fails if ANY source defines a weaker umask, so /etc/login.defs
+# (ships with UMASK 022) must be aligned too.
 c_5_4_3() {
     ensure_file_content /etc/profile.d/60-cis-shell.sh 0644 <<EOF
 # Managed by CIS hardening — controls 5.4.3.2, 5.4.3.3
@@ -232,5 +340,7 @@ readonly TMOUT
 export TMOUT
 umask ${CIS_5_4_DEFAULT_UMASK}
 EOF
+    ensure_line /etc/login.defs '^#?[[:space:]]*UMASK[[:space:]]' \
+        "$(printf 'UMASK\t\t%s' "$CIS_5_4_DEFAULT_UMASK")"
 }
-run 1 5.4.3.2 "Shell timeout (TMOUT) and default umask" c_5_4_3
+run 1 5.4.3.2 "Shell timeout (TMOUT) and default umask (profile.d + login.defs)" c_5_4_3

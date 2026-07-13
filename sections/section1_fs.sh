@@ -81,10 +81,11 @@ c_1_2_1_2() {
         SKIP_REASON="disabled via CIS_1_2_1_2_DISABLE_WEAK_DEPS"
         return 0
     fi
+    # CIS-CAT requires the literal value "0" (not "false").
     ensure_file_content /etc/apt/apt.conf.d/99cis-no-weak-deps 0644 <<'EOF'
 # Managed by CIS hardening — control 1.2.1.2
-APT::Install-Recommends "false";
-APT::Install-Suggests "false";
+APT::Install-Recommends "0";
+APT::Install-Suggests "0";
 EOF
 }
 run 2 1.2.1.2 "Disable APT weak dependencies (Recommends/Suggests)" c_1_2_1_2
@@ -143,6 +144,19 @@ c_1_5_5() {
 }
 run 1 1.5.5 "kernel.dmesg_restrict = 1" c_1_5_5
 
+# 1.5.4 — fs.suid_dumpable = 0 (no core dumps from setuid programs).
+c_1_5_4() {
+    ensure_sysctl /etc/sysctl.d/60-cis-1.5.4.conf fs.suid_dumpable 0
+}
+run 1 1.5.4 "fs.suid_dumpable = 0" c_1_5_4
+
+# 1.5.9 — ASLR. Runtime default is already 2, but the benchmark requires the
+# value to be pinned in a sysctl config file.
+c_1_5_9() {
+    ensure_sysctl /etc/sysctl.d/60-cis-1.5.9.conf kernel.randomize_va_space 2
+}
+run 1 1.5.9 "kernel.randomize_va_space = 2" c_1_5_9
+
 # 1.5.6 — prelink not installed (interferes with ASLR / integrity).
 c_1_5_6() {
     if ! bool "$CIS_1_5_6_PRELINK_REMOVE"; then
@@ -180,17 +194,54 @@ EOF
 }
 run 1 1.6.1 "Configure /etc/motd warning banner" c_1_6_1
 
-# 1.6.4 — pam_motd: disable the dynamic motd-news that leaks system info.
+# 1.6.2 / 1.6.3 — /etc/issue and /etc/issue.net: same clean banner, no OS info.
+# issue.net doubles as the sshd Banner file (5.1.5 / 1.6.5 / 1.6.10).
+c_1_6_2() {
+    if ! bool "$CIS_1_6_MANAGE_BANNERS"; then
+        SKIP_REASON="disabled via CIS_1_6_MANAGE_BANNERS"
+        return 0
+    fi
+    ensure_file_content /etc/issue 0644 <<EOF
+${CIS_1_6_BANNER_TEXT}
+EOF
+}
+run 1 1.6.2 "Configure /etc/issue warning banner" c_1_6_2
+
+c_1_6_3() {
+    if ! bool "$CIS_1_6_MANAGE_BANNERS"; then
+        SKIP_REASON="disabled via CIS_1_6_MANAGE_BANNERS"
+        return 0
+    fi
+    ensure_file_content /etc/issue.net 0644 <<EOF
+${CIS_1_6_BANNER_TEXT}
+EOF
+}
+run 1 1.6.3 "Configure /etc/issue.net warning banner (sshd Banner file)" c_1_6_3
+
+# 1.6.1 / 1.6.4 — pam_motd: Ubuntu's dynamic MOTD scripts print OS/patch info
+# at login (the scanner flags each script). Remove their execute bit and keep
+# motd-news off. Reversible with chmod +x.
 c_1_6_4() {
     if ! bool "$CIS_1_6_MANAGE_BANNERS"; then
         SKIP_REASON="disabled via CIS_1_6_MANAGE_BANNERS"
         return 0
     fi
     ensure_line /etc/default/motd-news '^ENABLED=' 'ENABLED=0'
+    if bool "$CIS_1_6_DISABLE_DYNAMIC_MOTD" && [[ -d /etc/update-motd.d ]]; then
+        local f n=0
+        for f in /etc/update-motd.d/*; do
+            [[ -f $f && -x $f ]] || continue
+            CHANGED=1
+            n=$((n + 1))
+            (( DRY_RUN )) || chmod -x "$f"
+        done
+        (( n )) && EXTRA_MSG="$n dynamic MOTD script(s) disabled"
+    fi
+    return 0
 }
-run 1 1.6.4 "Disable dynamic MOTD news (pam_motd)" c_1_6_4
+run 1 1.6.4 "Disable dynamic MOTD (motd-news + update-motd.d scripts)" c_1_6_4
 
-# 1.6.6-1.6.8 — Permissions on banner files (root:root 0644).
+# 1.6.6-1.6.10 — Permissions on banner files (root:root 0644).
 c_1_6_perms() {
     local f
     for f in /etc/motd /etc/issue /etc/issue.net; do

@@ -4,14 +4,9 @@
 # Sourced by harden.sh. Ported from the Ansible tasks/section7_system.yml.
 # =============================================================================
 
-# Build the shared `find` pruning arguments from CIS_7_FS_SCAN_EXCLUDES.
-# Keeps the recursive sweeps below from touching container/k8s storage.
-# [K8S-RISK][CONTAINER-RISK] see config/hardening.conf.
-CIS_FIND_EXCLUDES=()
-for _p in "${CIS_7_FS_SCAN_EXCLUDES[@]}"; do
-    CIS_FIND_EXCLUDES+=(-not -path "${_p}/*")
-done
-unset _p
+# The shared `find` pruning arguments (CIS_FIND_EXCLUDES) are built once in
+# harden.sh from CIS_7_FS_SCAN_EXCLUDES — keeps the recursive sweeps below from
+# touching container/k8s storage. [K8S-RISK][CONTAINER-RISK]
 
 # -----------------------------------------------------------------------------
 # 7.1.x — Filesystem permissions
@@ -61,27 +56,43 @@ run 1 7.1.12 "Files/dirs without a valid owner or group (report only)" c_7_1_12
 # -----------------------------------------------------------------------------
 # 7.2.x — Local user / group settings
 # -----------------------------------------------------------------------------
-# 7.2.10 — interactive users' dot files are not group/world writable.
+# 7.2.10 — interactive users' dot files: no group/world write, owned by the
+# user, and no .netrc/.forward/.rhosts (those are flagged for manual removal —
+# deleting user files automatically is not safe).
 c_7_2_10() {
     if ! bool "$CIS_7_2_10_FIX_USER_DOTFILES"; then
         SKIP_REASON="disabled via CIS_7_2_10_FIX_USER_DOTFILES"
         return 0
     fi
-    local homes=() h hits=() total=0 f
-    mapfile -t homes < <(awk -F: '($3>=1000 && $3!=65534 && $7!~/(nologin|false)$/){print $6}' /etc/passwd)
-    for h in "${homes[@]}"; do
-        [[ -d $h ]] || continue
-        mapfile -t hits < <(find "$h" -maxdepth 1 -name '.*' -type f -perm /0022 2>/dev/null)
-        (( ${#hits[@]} )) || continue
-        CHANGED=1
-        total=$((total + ${#hits[@]}))
-        (( DRY_RUN )) && continue
-        for f in "${hits[@]}"; do
-            chmod go-w "$f" 2>>"$LOG_FILE" || true
-            printf '7.2.10 go-w: %s\n' "$f" >>"$LOG_FILE"
-        done
-    done
-    (( total )) && EXTRA_MSG="$total dotfile(s) had group/other write removed"
+    local user home f total=0 risky=()
+    while IFS=: read -r user home; do
+        [[ -d $home ]] || continue
+        while IFS= read -r f; do
+            case $(basename "$f") in
+                .netrc|.forward|.rhosts)
+                    risky+=("$f")
+                    continue ;;
+            esac
+            local st fix=0
+            st=$(stat -c '%a %U' "$f")
+            (( 8#${st%% *} & 8#0022 )) && fix=1
+            [[ ${st##* } != "$user" ]] && fix=1
+            if (( fix )); then
+                CHANGED=1
+                total=$((total + 1))
+                if (( ! DRY_RUN )); then
+                    chmod go-w "$f" 2>>"$LOG_FILE" || true
+                    chown "$user" "$f" 2>>"$LOG_FILE" || true
+                    printf '7.2.10 fixed: %s\n' "$f" >>"$LOG_FILE"
+                fi
+            fi
+        done < <(find "$home" -maxdepth 1 -name '.*' -type f 2>/dev/null)
+    done < <(awk -F: '($3>=1000 && $3!=65534 && $7!~/(nologin|false)$/){print $1":"$6}' /etc/passwd)
+    (( total )) && EXTRA_MSG="$total dotfile(s) fixed (perms/ownership)"
+    if (( ${#risky[@]} )); then
+        STATUS_OVERRIDE=MANUAL
+        EXTRA_MSG="${EXTRA_MSG:+$EXTRA_MSG; }found ${risky[*]} — review and remove manually"
+    fi
     return 0
 }
-run 1 7.2.10 "Interactive users' dotfiles not group/world writable" c_7_2_10
+run 1 7.2.10 "Interactive users' dotfiles (perms, ownership, .netrc/.forward/.rhosts)" c_7_2_10

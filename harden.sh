@@ -77,6 +77,7 @@ BACKUP_DIR="/var/backups/cis-hardening/$RUN_TS"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/run-$RUN_TS.log"
 : > "$LOG_FILE"
+chmod 0600 "$LOG_FILE"   # keep our own logs within the 6.1.3.1 policy
 
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
@@ -97,6 +98,14 @@ info "============================================================"
 if bool "$CIS_2_3_MANAGE_TIMESYNCD" && [[ $CIS_2_3_NTP_SERVERS == *example.org* ]]; then
     warn "CIS_2_3_NTP_SERVERS still holds placeholder values — time sync will not work until you set real NTP servers in $CONFIG_FILE"
 fi
+
+# Shared `find` pruning arguments from CIS_7_FS_SCAN_EXCLUDES — used by the
+# section 7 sweeps and the section 6 privileged-command rule generator.
+CIS_FIND_EXCLUDES=()
+for _p in "${CIS_7_FS_SCAN_EXCLUDES[@]}"; do
+    CIS_FIND_EXCLUDES+=(-not -path "${_p}/*")
+done
+unset _p
 
 # --- run sections --------------------------------------------------------------
 declare -A SECTION_FILE=(
@@ -159,6 +168,10 @@ flush_handlers() {
     if [[ ${NOTIFY[initramfs]:-} ]]; then
         log "handler: update-initramfs -u"
         update-initramfs -u >>"$LOG_FILE" 2>&1 || warn "update-initramfs failed"
+    fi
+    if [[ ${NOTIFY[grub]:-} ]]; then
+        log "handler: update-grub"
+        update-grub >>"$LOG_FILE" 2>&1 || warn "update-grub failed"
     fi
     if [[ ${NOTIFY[timesyncd]:-} ]]; then
         log "handler: restart systemd-timesyncd"

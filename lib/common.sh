@@ -217,10 +217,86 @@ ensure_line() {
     rm -f "$tmp"
 }
 
+_sysctl_norm_key() {
+    # normalize "net/ipv4/conf/all/log_martians" or padded keys to dot form
+    printf '%s' "$1" | tr -d '[:blank:]' | tr '/' '.'
+}
+
+sysctl_has_conflict() {
+    # sysctl_has_conflict FILE KEY VAL — true if FILE assigns KEY (exact or
+    # glob pattern like net.ipv4.conf.*.rp_filter) a value other than VAL
+    local file=$1 key=$2 val=$3 line k v
+    [[ -f $file ]] || return 1
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line == *=* ]] || continue
+        [[ $line =~ ^[[:space:]]*[\#\;] ]] && continue
+        k=$(_sysctl_norm_key "${line%%=*}")
+        v="${line#*=}"; v="${v//[[:blank:]]/}"
+        [[ -n $k ]] || continue
+        # shellcheck disable=SC2254
+        case $key in
+            $k) [[ $v != "$val" ]] && return 0 ;;
+        esac
+    done <"$file"
+    return 1
+}
+
+sysctl_fix_conflicts_in() {
+    # sysctl_fix_conflicts_in FILE KEY VAL — comment out conflicting assignments
+    local file=$1 key=$2 val=$3 line k v tmp any=0
+    sysctl_has_conflict "$file" "$key" "$val" || return 0
+    CHANGED=1
+    (( DRY_RUN )) && return 0
+    tmp=$(mktemp)
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line == *=* && ! $line =~ ^[[:space:]]*[\#\;] ]]; then
+            k=$(_sysctl_norm_key "${line%%=*}")
+            v="${line#*=}"; v="${v//[[:blank:]]/}"
+            # shellcheck disable=SC2254
+            case $key in
+                $k)
+                    if [[ $v != "$val" ]]; then
+                        printf '# commented by CIS hardening — conflicts with %s = %s\n#%s\n' \
+                            "$key" "$val" "$line" >>"$tmp"
+                        any=1
+                        continue
+                    fi ;;
+            esac
+        fi
+        printf '%s\n' "$line" >>"$tmp"
+    done <"$file"
+    if (( any )); then
+        backup_file "$file"
+        cat "$tmp" > "$file"
+    fi
+    rm -f "$tmp"
+}
+
 ensure_sysctl() {
-    # ensure_sysctl DROPIN_FILE KEY VALUE — persist in /etc/sysctl.d + apply live
-    local file=$1 key=$2 val=$3 cur
+    # ensure_sysctl DROPIN_FILE KEY VALUE — persist in /etc/sysctl.d + apply live.
+    # Also neutralizes conflicting assignments elsewhere: CIS audits fail a
+    # parameter when ANY sysctl source (incl. /etc/ufw/sysctl.conf) holds a
+    # different value, even though our drop-in wins at apply time.
+    local file=$1 key=$2 val=$3 cur cf mask
     ensure_line "$file" "^${key}[[:space:]]*=" "${key} = ${val}"
+    for cf in /etc/sysctl.conf /etc/ufw/sysctl.conf /etc/sysctl.d/*.conf; do
+        [[ -f $cf && $cf != "$file" ]] || continue
+        sysctl_fix_conflicts_in "$cf" "$key" "$val"
+    done
+    # /usr/lib/sysctl.d drop-ins are package-owned: mask by copying the file to
+    # /etc/sysctl.d (same basename overrides it entirely) and editing the copy.
+    for cf in /usr/lib/sysctl.d/*.conf; do
+        [[ -f $cf ]] || continue
+        mask="/etc/sysctl.d/$(basename "$cf")"
+        [[ -f $mask ]] && continue
+        if sysctl_has_conflict "$cf" "$key" "$val"; then
+            CHANGED=1
+            if (( ! DRY_RUN )); then
+                cp -a "$cf" "$mask"
+                sysctl_fix_conflicts_in "$mask" "$key" "$val"
+            fi
+        fi
+    done
     # Apply to the running kernel only if the key exists (e.g. IPv6 may be off).
     if cur=$(sysctl -n "$key" 2>/dev/null); then
         if [[ $cur != "$val" ]]; then
