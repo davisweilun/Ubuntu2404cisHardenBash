@@ -70,7 +70,18 @@ EOF
                     fi
                 fi ;;
             *.journal|*.journal~)
-                : ;;  # journald manages its own files/group
+                # journald manages perms, but the old recursive tmpfiles rule
+                # chgrp'ed existing journals to adm; the benchmark requires
+                # group root or systemd-journal. Repair without touching mode.
+                local jg
+                jg=$(stat -c '%G' "$f")
+                if [[ $jg != root && $jg != systemd-journal ]]; then
+                    CHANGED=1; n=$((n + 1))
+                    if (( ! DRY_RUN )); then
+                        chgrp systemd-journal "$f" 2>>"$LOG_FILE" \
+                            || chgrp root "$f" 2>>"$LOG_FILE" || true
+                    fi
+                fi ;;
             *)
                 # 0640 or more restrictive: clear u+x, g+wx, o+rwx if set
                 if [[ -n $(find "$f" -perm /0137 2>/dev/null) ]]; then
@@ -170,7 +181,8 @@ c_6_2_3() {
         SKIP_REASON="auditd not installed (no /etc/audit/rules.d)"
         return 0
     fi
-    ensure_file_content /etc/audit/rules.d/60-cis.rules 0640 <<'EOF'
+    # Unquoted heredoc: only ${CIS_5_2_3_SUDO_LOGFILE} is expanded below.
+    ensure_file_content /etc/audit/rules.d/60-cis.rules 0640 <<EOF
 ## Managed by CIS hardening — Section 6.2.3
 ## 6.2.3.1 — changes to system administration scope (sudoers)
 -w /etc/sudoers -p wa -k scope
@@ -178,6 +190,8 @@ c_6_2_3() {
 ## 6.2.3.2 — actions as another user
 -a always,exit -F arch=b64 -C euid!=uid -F auid!=unset -S execve -k user_emulation
 -a always,exit -F arch=b32 -C euid!=uid -F auid!=unset -S execve -k user_emulation
+## 6.2.3.3 — changes to the sudo log file (5.2.3)
+-w ${CIS_5_2_3_SUDO_LOGFILE} -p wa -k sudo_log_file
 ## 6.2.3.4 — date and time modification
 -a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change
 -a always,exit -F arch=b32 -S adjtimex,settimeofday,clock_settime -k time-change
@@ -226,9 +240,9 @@ c_6_2_3() {
 ## 6.2.3.21 — login and logout events
 -w /var/log/lastlog -p wa -k logins
 -w /var/run/faillock -p wa -k logins
-## 6.2.3.22 — file deletion events by users
--a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=unset -k delete
--a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=unset -k delete
+## 6.2.3.22 — file deletion events by users (incl. renameat2)
+-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat,renameat2 -F auid>=1000 -F auid!=unset -k delete
+-a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat,renameat2 -F auid>=1000 -F auid!=unset -k delete
 ## 6.2.3.23 — Mandatory Access Control (AppArmor) modifications
 -w /etc/apparmor/ -p wa -k MAC-policy
 -w /etc/apparmor.d/ -p wa -k MAC-policy
@@ -239,7 +253,7 @@ c_6_2_3() {
 ## 6.2.3.28 — kernel module load/unload/modify
 -a always,exit -F arch=b64 -S init_module,finit_module,delete_module,create_module,query_module -F auid>=1000 -F auid!=unset -k kernel_modules
 -a always,exit -F arch=b32 -S init_module,finit_module,delete_module -F auid>=1000 -F auid!=unset -k kernel_modules
--w /usr/bin/kmod -p x -k kernel_modules
+-a always,exit -F path=/usr/bin/kmod -F perm=x -F auid>=1000 -F auid!=unset -k kernel_modules
 EOF
     (( CHANGED )) && notify auditd
     return 0

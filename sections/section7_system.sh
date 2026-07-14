@@ -57,37 +57,41 @@ run 1 7.1.12 "Files/dirs without a valid owner or group (report only)" c_7_1_12
 # 7.2.x — Local user / group settings
 # -----------------------------------------------------------------------------
 # 7.2.10 — interactive users' dot files: no group/world write, owned by the
-# user, and no .netrc/.forward/.rhosts (those are flagged for manual removal —
-# deleting user files automatically is not safe).
+# user and their primary group, and no .netrc/.forward/.rhosts (those are
+# flagged for manual removal — deleting user files automatically is not safe).
+# The scanner includes root, checks dot files at ANY depth under each home,
+# and verifies group ownership, so this sweep does the same.
 c_7_2_10() {
     if ! bool "$CIS_7_2_10_FIX_USER_DOTFILES"; then
         SKIP_REASON="disabled via CIS_7_2_10_FIX_USER_DOTFILES"
         return 0
     fi
-    local user home f total=0 risky=()
+    local user home pg f total=0 risky=()
     while IFS=: read -r user home; do
         [[ -d $home ]] || continue
+        pg=$(id -gn "$user" 2>/dev/null) || pg=$user
         while IFS= read -r f; do
             case $(basename "$f") in
                 .netrc|.forward|.rhosts)
                     risky+=("$f")
                     continue ;;
             esac
-            local st fix=0
-            st=$(stat -c '%a %U' "$f")
-            (( 8#${st%% *} & 8#0022 )) && fix=1
-            [[ ${st##* } != "$user" ]] && fix=1
+            local st fm fu fg fix=0
+            st=$(stat -c '%a %U %G' "$f" 2>/dev/null) || continue
+            read -r fm fu fg <<<"$st"
+            (( 8#$fm & 8#0022 )) && fix=1
+            [[ $fu != "$user" || $fg != "$pg" ]] && fix=1
             if (( fix )); then
                 CHANGED=1
                 total=$((total + 1))
                 if (( ! DRY_RUN )); then
                     chmod go-w "$f" 2>>"$LOG_FILE" || true
-                    chown "$user" "$f" 2>>"$LOG_FILE" || true
+                    chown "$user:$pg" "$f" 2>>"$LOG_FILE" || true
                     printf '7.2.10 fixed: %s\n' "$f" >>"$LOG_FILE"
                 fi
             fi
-        done < <(find "$home" -maxdepth 1 -name '.*' -type f 2>/dev/null)
-    done < <(awk -F: '($3>=1000 && $3!=65534 && $7!~/(nologin|false)$/){print $1":"$6}' /etc/passwd)
+        done < <(find "$home" -xdev -name '.*' -type f 2>/dev/null)
+    done < <(awk -F: '(($3==0 || $3>=1000) && $3!=65534 && $7!~/(nologin|false)$/){print $1":"$6}' /etc/passwd)
     (( total )) && EXTRA_MSG="$total dotfile(s) fixed (perms/ownership)"
     if (( ${#risky[@]} )); then
         STATUS_OVERRIDE=MANUAL

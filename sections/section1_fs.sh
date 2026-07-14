@@ -182,17 +182,26 @@ run 1 1.5.7 "Disable Automatic Error Reporting (apport)" c_1_5_7
 # -----------------------------------------------------------------------------
 # 1.6.x — Command-line warning banners
 # -----------------------------------------------------------------------------
-# 1.6.1 — /etc/motd present without OS escapes (\m \r \s \v).
+# 1.6.1 / 1.6.6 — /etc/motd. The benchmark passes when the file is ABSENT, and
+# the scanner's permission probe (nix_motd_permission_chk_v2.sh) fails even on
+# a 0644 root:root banner file, so removing it is the only reliable pass. The
+# login banner itself lives in /etc/issue and /etc/issue.net (1.6.2/1.6.3).
 c_1_6_1() {
     if ! bool "$CIS_1_6_MANAGE_BANNERS"; then
         SKIP_REASON="disabled via CIS_1_6_MANAGE_BANNERS"
         return 0
     fi
-    ensure_file_content /etc/motd 0644 <<EOF
-${CIS_1_6_BANNER_TEXT}
-EOF
+    if [[ -e /etc/motd || -L /etc/motd ]]; then
+        CHANGED=1
+        EXTRA_MSG="/etc/motd removed (banner stays in /etc/issue, /etc/issue.net)"
+        if (( ! DRY_RUN )); then
+            backup_file /etc/motd
+            rm -f /etc/motd
+        fi
+    fi
+    return 0
 }
-run 1 1.6.1 "Configure /etc/motd warning banner" c_1_6_1
+run 1 1.6.1 "Remove /etc/motd (banner served by /etc/issue*)" c_1_6_1
 
 # 1.6.2 / 1.6.3 — /etc/issue and /etc/issue.net: same clean banner, no OS info.
 # issue.net doubles as the sshd Banner file (5.1.5 / 1.6.5 / 1.6.10).
@@ -219,8 +228,11 @@ EOF
 run 1 1.6.3 "Configure /etc/issue.net warning banner (sshd Banner file)" c_1_6_3
 
 # 1.6.1 / 1.6.4 — pam_motd: Ubuntu's dynamic MOTD scripts print OS/patch info
-# at login (the scanner flags each script). Remove their execute bit and keep
-# motd-news off. Reversible with chmod +x.
+# at login. The scanner evaluates every file in /etc/update-motd.d — it runs
+# executable ones and reads the raw CONTENT of non-executable ones — so
+# chmod -x alone is not enough: any file mentioning the OS name or agetty
+# escapes (\v \m \r \s) must be removed (backed up first). The stale generated
+# /run/motd.dynamic is emptied too, since pam_motd shows it as-is at login.
 c_1_6_4() {
     if ! bool "$CIS_1_6_MANAGE_BANNERS"; then
         SKIP_REASON="disabled via CIS_1_6_MANAGE_BANNERS"
@@ -228,14 +240,28 @@ c_1_6_4() {
     fi
     ensure_line /etc/default/motd-news '^ENABLED=' 'ENABLED=0'
     if bool "$CIS_1_6_DISABLE_DYNAMIC_MOTD" && [[ -d /etc/update-motd.d ]]; then
-        local f n=0
+        local f removed=0 disabled=0
         for f in /etc/update-motd.d/*; do
-            [[ -f $f && -x $f ]] || continue
-            CHANGED=1
-            n=$((n + 1))
-            (( DRY_RUN )) || chmod -x "$f"
+            [[ -f $f ]] || continue
+            if grep -Eiq '\\[vmrs]|ubuntu' "$f"; then
+                CHANGED=1
+                removed=$((removed + 1))
+                if (( ! DRY_RUN )); then
+                    backup_file "$f"
+                    rm -f "$f"
+                fi
+            elif [[ -x $f ]]; then
+                CHANGED=1
+                disabled=$((disabled + 1))
+                (( DRY_RUN )) || chmod -x "$f"
+            fi
         done
-        (( n )) && EXTRA_MSG="$n dynamic MOTD script(s) disabled"
+        (( removed || disabled )) && \
+            EXTRA_MSG="$removed MOTD script(s) removed (backed up), $disabled disabled"
+        if [[ -f /run/motd.dynamic ]] && grep -Eiq '\\[vmrs]|ubuntu' /run/motd.dynamic; then
+            CHANGED=1
+            (( DRY_RUN )) || : > /run/motd.dynamic
+        fi
     fi
     return 0
 }
