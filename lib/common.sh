@@ -348,15 +348,21 @@ pkg_installed() {
     dpkg-query -W -f '${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
 }
 
-APT_REFRESHED=0
+APT_REFRESH_OK=0
+APT_REFRESH_TRIES=0
 apt_refresh() {
-    # Refresh the package lists at most once per run, and only when an install
-    # is actually needed (a run with nothing to install never touches the
-    # network). Failure is tolerated: on air-gapped hosts the subsequent
-    # install decides between proceeding from cache and reporting SKIP.
-    (( APT_REFRESHED )) && return 0
-    APT_REFRESHED=1
-    DEBIAN_FRONTEND=noninteractive apt-get update >>"$LOG_FILE" 2>&1 || true
+    # Refresh the package lists before the run's first install — only when an
+    # install is actually needed (a run with nothing to install never touches
+    # the network). A failed update is retried once at the next install
+    # (transient network hiccup), then abandoned so air-gapped hosts aren't
+    # slowed by a network timeout per package; the subsequent install then
+    # decides between proceeding from cache and reporting SKIP.
+    (( APT_REFRESH_OK )) && return 0
+    (( APT_REFRESH_TRIES >= 2 )) && return 0
+    APT_REFRESH_TRIES=$((APT_REFRESH_TRIES + 1))
+    if DEBIAN_FRONTEND=noninteractive apt update >>"$LOG_FILE" 2>&1; then
+        APT_REFRESH_OK=1
+    fi
 }
 
 pkg_present() {
@@ -369,7 +375,7 @@ pkg_present() {
     CHANGED=1
     (( DRY_RUN )) && return 0
     apt_refresh
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    if ! DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends \
             "${missing[@]}" >>"$LOG_FILE" 2>&1; then
         SKIP_REASON="package(s) not installable: ${missing[*]} (no repo/mirror reachable?)"
         CHANGED=0
@@ -385,6 +391,6 @@ pkg_absent() {
     (( ${#present[@]} )) || return 0
     CHANGED=1
     (( DRY_RUN )) && return 0
-    DEBIAN_FRONTEND=noninteractive apt-get purge -y "${present[@]}" \
+    DEBIAN_FRONTEND=noninteractive apt purge -y "${present[@]}" \
         >>"$LOG_FILE" 2>&1
 }
