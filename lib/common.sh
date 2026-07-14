@@ -348,6 +348,17 @@ pkg_installed() {
     dpkg-query -W -f '${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
 }
 
+APT_REFRESHED=0
+apt_refresh() {
+    # Refresh the package lists at most once per run, and only when an install
+    # is actually needed (a run with nothing to install never touches the
+    # network). Failure is tolerated: on air-gapped hosts the subsequent
+    # install decides between proceeding from cache and reporting SKIP.
+    (( APT_REFRESHED )) && return 0
+    APT_REFRESHED=1
+    DEBIAN_FRONTEND=noninteractive apt-get update >>"$LOG_FILE" 2>&1 || true
+}
+
 pkg_present() {
     # pkg_present NAME... — install missing packages
     local p missing=()
@@ -357,6 +368,7 @@ pkg_present() {
     (( ${#missing[@]} )) || return 0
     CHANGED=1
     (( DRY_RUN )) && return 0
+    apt_refresh
     if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             "${missing[@]}" >>"$LOG_FILE" 2>&1; then
         SKIP_REASON="package(s) not installable: ${missing[*]} (no repo/mirror reachable?)"
